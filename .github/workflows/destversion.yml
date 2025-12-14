@@ -1,0 +1,22 @@
+name: WeChat Version Check
+
+on:
+  schedule:
+    # 每天 UTC 7:00 (北京时间 15:00) 执行
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    # 支持手动触发
+
+jobs:
+  check_and_release:
+    runs-on: macos-13
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Check new version and create release
+        env: 
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash -x ./scripts/destVersionForMac.sh
