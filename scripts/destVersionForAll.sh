@@ -63,147 +63,91 @@ extract_download_links() {
         return 1
     fi
     
-    # 使用 Python 提取和解析下载链接
+    # 使用正则表达式直接提取下载链接
     local parse_result
-    local python_err
-    python_err=$(mktemp)
     parse_result=$(echo "$HTML_CONTENT" | python3 << 'PYTHON_SCRIPT'
-import json
 import sys
 import re
 
 try:
     html = sys.stdin.read()
     
-    # 查找包含 downloadConf 的 script 标签
-    scripts = re.findall(r'<script[^>]*>(.*?)</script>', html, re.DOTALL)
+    # 使用正则表达式匹配所有下载链接
+    # 优先匹配 Universal 版本（最新版本）
+    patterns = [
+        # Mac 版本 - 优先 Universal/Mac
+        (r'"(https?://[^"]*Universal[^"]*[Mm]ac[^"]*\.dmg)"', 'mac', 1),
+        (r'"(https?://[^"]*WeChatMac[^"]*\.dmg)"', 'mac', 2),
+        (r'"(https?://[^"]*[Mm]ac[^"]*\.dmg)"', 'mac', 3),
+        # Windows 版本 - 优先 Universal/Windows
+        (r'"(https?://[^"]*Universal[^"]*[Ww]indows[^"]*\.exe)"', 'windows', 1),
+        (r'"(https?://[^"]*WeChatWin[^"]*\.exe)"', 'windows', 2),
+        (r'"(https?://[^"]*[Ww]indows[^"]*\.exe)"', 'windows', 3),
+        # Android 版本 - 优先 arm64，然后区分 32 位
+        (r'"(https?://[^"]*android[^"]*32[^"]*\.apk)"', 'android32', 1),
+        (r'"(https?://[^"]*weixin[^"]*32[^"]*\.apk)"', 'android32', 2),
+        (r'"(https?://[^"]*android[^"]*arm64[^"]*\.apk)"', 'android', 1),
+        (r'"(https?://[^"]*weixin[^"]*arm64[^"]*\.apk)"', 'android', 2),
+        (r'"(https?://[^"]*android[^"]*\.apk)"', 'android', 3),
+        (r'"(https?://[^"]*weixin[^"]*\.apk)"', 'android', 4),
+    ]
     
-    if not scripts:
-        print("ERROR: No script tags found in page", file=sys.stderr)
-        sys.exit(1)
+    found_links = {}  # {platform: (url, priority)}
     
-    data_array = None
-    download_conf_idx = None
+    # 按优先级匹配
+    for pattern, platform, priority in patterns:
+        matches = re.findall(pattern, html)
+        for url in matches:
+            # 确保 URL 是有效的下载链接
+            if url.startswith('http') and (url.endswith('.dmg') or url.endswith('.exe') or url.endswith('.apk')):
+                # 如果该平台还没有链接，或者当前优先级更高，则更新
+                if platform not in found_links or found_links[platform][1] > priority:
+                    found_links[platform] = (url, priority)
     
-    # 遍历所有 script 标签，查找包含 downloadConf 的
-    for script_idx, script in enumerate(scripts):
-        if 'downloadConf' in script:
-            # 查找 JSON 数组 - 需要找到完整的数组（从第一个 [ 到匹配的 ]）
-            start_pos = script.find('[')
-            if start_pos != -1:
-                # 从第一个 [ 开始，找到匹配的 ]
-                bracket_count = 0
-                end_pos = start_pos
-                for i in range(start_pos, len(script)):
-                    if script[i] == '[':
-                        bracket_count += 1
-                    elif script[i] == ']':
-                        bracket_count -= 1
-                        if bracket_count == 0:
-                            end_pos = i + 1
-                            break
-                
-                if end_pos > start_pos:
-                    array_str = script[start_pos:end_pos]
-                    try:
-                        # 尝试解析 JSON 数组
-                        data_array = json.loads(array_str)
-                        
-                        # 查找包含 downloadConf 的对象
-                        for i, item in enumerate(data_array):
-                            if isinstance(item, dict) and 'downloadConf' in item:
-                                download_conf_idx = item['downloadConf']
-                                break
-                        
-                        if download_conf_idx is not None:
-                            break
-                    except json.JSONDecodeError as e:
-                        # 继续尝试下一个 script 标签
-                        continue
+    # 如果某些平台没找到，尝试更通用的模式
+    if 'mac' not in found_links:
+        mac_urls = re.findall(r'"(https?://[^"]+\.dmg)"', html)
+        if mac_urls:
+            found_links['mac'] = (mac_urls[0], 99)
     
-    # 如果没找到，尝试直接搜索下载链接
-    if data_array is None or download_conf_idx is None:
-        # 尝试直接从 HTML 中提取下载链接
-        urls = re.findall(r'"(https?://[^"]+\.(?:dmg|exe|apk))"', html)
-        if urls:
-            # 尝试识别平台
-            found_links = {}
-            for url in set(urls):
-                if 'Mac' in url or 'mac' in url.lower() or url.endswith('.dmg'):
-                    if 'mac' not in found_links:
-                        found_links['mac'] = url
-                elif 'Windows' in url or 'Win' in url or url.endswith('.exe'):
-                    if 'windows' not in found_links:
-                        found_links['windows'] = url
-                elif 'android' in url.lower() or url.endswith('.apk'):
-                    if 'android32' in url.lower() or '32' in url:
-                        if 'android32' not in found_links:
-                            found_links['android32'] = url
-                    elif 'android' not in found_links:
-                        found_links['android'] = url
-            
-            if found_links:
-                for platform, url in found_links.items():
-                    print(f"{platform}|{url}")
-                sys.exit(0)
-        
-        print("ERROR: Could not find downloadConf in page", file=sys.stderr)
-        sys.exit(1)
+    if 'windows' not in found_links:
+        win_urls = re.findall(r'"(https?://[^"]+WeChatWin[^"]+\.exe)"', html)
+        if win_urls:
+            found_links['windows'] = (win_urls[0], 99)
+        else:
+            exe_urls = re.findall(r'"(https?://[^"]+\.exe)"', html)
+            if exe_urls:
+                found_links['windows'] = (exe_urls[0], 99)
     
-    # 获取 downloadConf 对象
-    if not isinstance(download_conf_idx, int) or download_conf_idx >= len(data_array):
-        print("ERROR: Invalid downloadConf index", file=sys.stderr)
-        sys.exit(1)
+    if 'android' not in found_links and 'android32' not in found_links:
+        apk_urls = re.findall(r'"(https?://[^"]+\.apk)"', html)
+        if apk_urls:
+            # 检查是否有 32 位版本
+            for url in apk_urls:
+                if '32' in url.lower() or 'android32' in url.lower():
+                    found_links['android32'] = (url, 99)
+                    break
+            # 选择最新的 android 版本（通常版本号更高）
+            if apk_urls:
+                found_links['android'] = (apk_urls[0], 99)
     
-    download_conf = data_array[download_conf_idx]
-    
-    if not isinstance(download_conf, dict):
-        print("ERROR: downloadConf is not a dictionary", file=sys.stderr)
-        sys.exit(1)
-    
-    # 提取各平台下载链接（通过索引）
-    platforms = {
-        'mac': download_conf.get('mac'),
-        'windows': download_conf.get('windows'),
-        'android': download_conf.get('android'),
-        'android32': download_conf.get('android32')
-    }
-    
-    # 输出为 shell 可读的格式
-    found = False
-    for platform, link_idx in platforms.items():
-        if isinstance(link_idx, int) and link_idx < len(data_array):
-            url = data_array[link_idx]
-            if isinstance(url, str) and url.startswith('http'):
-                print(f"{platform}|{url}")
-                found = True
-    
-    if not found:
-        print("ERROR: No valid download links found", file=sys.stderr)
+    # 输出结果
+    if found_links:
+        for platform in ['mac', 'windows', 'android', 'android32']:
+            if platform in found_links:
+                print(f"{platform}|{found_links[platform][0]}")
+    else:
+        print("ERROR: No download links found", file=sys.stderr)
         sys.exit(1)
         
 except Exception as e:
     print(f"ERROR: {str(e)}", file=sys.stderr)
-    import traceback
-    traceback.print_exc(file=sys.stderr)
     sys.exit(1)
 PYTHON_SCRIPT
-) 2>"$python_err"
-    local python_exit=$?
+)
     
-    if [ $python_exit -ne 0 ] || [ -z "$parse_result" ]; then
-        if [ -s "$python_err" ]; then
-            echo_color "red" "Python script error:"
-            cat "$python_err" >&2
-        fi
-        rm -f "$python_err"
-        echo_color "red" "Failed to parse download links from JSON!"
-        return 1
-    fi
-    rm -f "$python_err"
-    
-    if [ -z "$parse_result" ]; then
-        echo_color "red" "No download links found in JSON!"
+    if [ $? -ne 0 ] || [ -z "$parse_result" ]; then
+        echo_color "red" "Failed to extract download links!"
         return 1
     fi
     
