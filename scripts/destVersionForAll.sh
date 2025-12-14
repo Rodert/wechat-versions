@@ -71,7 +71,7 @@ extract_download_links() {
         echo_color "red" "Failed to extract JSON data from website!"
         echo_color "yellow" "Trying alternative method..."
         # 使用 Python 直接从 HTML 提取
-        JSON_DATA=$(python3 << 'PYTHON_EXTRACT'
+        JSON_DATA=$(echo "$HTML_CONTENT" | python3 << 'PYTHON_EXTRACT'
 import re
 import sys
 html = sys.stdin.read()
@@ -79,7 +79,7 @@ match = re.search(r'<script[^>]*id="__NUXT_DATA__"[^>]*>(\[.*?\])</script>', htm
 if match:
     print(match.group(1))
 PYTHON_EXTRACT
-<<< "$HTML_CONTENT")
+)
     fi
     
     if [ -z "$JSON_DATA" ]; then
@@ -88,7 +88,7 @@ PYTHON_EXTRACT
     fi
     
     # 使用 Python 解析 JSON（更可靠）
-    python3 << 'PYTHON_SCRIPT'
+    echo "$JSON_DATA" | python3 << 'PYTHON_SCRIPT'
 import json
 import sys
 import re
@@ -150,7 +150,7 @@ try:
 except Exception as e:
     print(f"ERROR: {str(e)}", file=sys.stderr)
     sys.exit(1)
-PYTHON_SCRIPT <<< "$JSON_DATA"
+PYTHON_SCRIPT
 }
 
 # 下载安装包
