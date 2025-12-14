@@ -1,4 +1,4 @@
-name: WeChat Multi-Platform Version Check
+name: WeChat Version Check
 
 on:
   schedule:
@@ -19,4 +19,5 @@ jobs:
       - name: Check new version and create release
         env: 
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash -x ./scripts/destVersionForAll.sh
+        run: bash -x ./scripts/destVersionForMac.sh
+
