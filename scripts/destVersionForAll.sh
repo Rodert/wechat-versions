@@ -65,6 +65,8 @@ extract_download_links() {
     
     # 使用 Python 提取和解析下载链接
     local parse_result
+    local python_err
+    python_err=$(mktemp)
     parse_result=$(echo "$HTML_CONTENT" | python3 << 'PYTHON_SCRIPT'
 import json
 import sys
@@ -76,11 +78,15 @@ try:
     # 查找包含 downloadConf 的 script 标签
     scripts = re.findall(r'<script[^>]*>(.*?)</script>', html, re.DOTALL)
     
+    if not scripts:
+        print("ERROR: No script tags found in page", file=sys.stderr)
+        sys.exit(1)
+    
     data_array = None
     download_conf_idx = None
     
     # 遍历所有 script 标签，查找包含 downloadConf 的
-    for script in scripts:
+    for script_idx, script in enumerate(scripts):
         if 'downloadConf' in script:
             # 查找 JSON 数组 - 需要找到完整的数组（从第一个 [ 到匹配的 ]）
             start_pos = script.find('[')
@@ -111,10 +117,36 @@ try:
                         
                         if download_conf_idx is not None:
                             break
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as e:
+                        # 继续尝试下一个 script 标签
                         continue
     
+    # 如果没找到，尝试直接搜索下载链接
     if data_array is None or download_conf_idx is None:
+        # 尝试直接从 HTML 中提取下载链接
+        urls = re.findall(r'"(https?://[^"]+\.(?:dmg|exe|apk))"', html)
+        if urls:
+            # 尝试识别平台
+            found_links = {}
+            for url in set(urls):
+                if 'Mac' in url or 'mac' in url.lower() or url.endswith('.dmg'):
+                    if 'mac' not in found_links:
+                        found_links['mac'] = url
+                elif 'Windows' in url or 'Win' in url or url.endswith('.exe'):
+                    if 'windows' not in found_links:
+                        found_links['windows'] = url
+                elif 'android' in url.lower() or url.endswith('.apk'):
+                    if 'android32' in url.lower() or '32' in url:
+                        if 'android32' not in found_links:
+                            found_links['android32'] = url
+                    elif 'android' not in found_links:
+                        found_links['android'] = url
+            
+            if found_links:
+                for platform, url in found_links.items():
+                    print(f"{platform}|{url}")
+                sys.exit(0)
+        
         print("ERROR: Could not find downloadConf in page", file=sys.stderr)
         sys.exit(1)
     
@@ -156,10 +188,19 @@ except Exception as e:
     traceback.print_exc(file=sys.stderr)
     sys.exit(1)
 PYTHON_SCRIPT
-) || {
+) 2>"$python_err"
+    local python_exit=$?
+    
+    if [ $python_exit -ne 0 ] || [ -z "$parse_result" ]; then
+        if [ -s "$python_err" ]; then
+            echo_color "red" "Python script error:"
+            cat "$python_err" >&2
+        fi
+        rm -f "$python_err"
         echo_color "red" "Failed to parse download links from JSON!"
         return 1
-    }
+    fi
+    rm -f "$python_err"
     
     if [ -z "$parse_result" ]; then
         echo_color "red" "No download links found in JSON!"
