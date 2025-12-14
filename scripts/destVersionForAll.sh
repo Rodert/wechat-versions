@@ -58,99 +58,115 @@ extract_download_links() {
     # 获取页面内容
     HTML_CONTENT=$(curl -s "$WEBSITE_URL")
     
-    # 提取 JSON 数据（从 __NUXT_DATA__ 脚本标签）
-    # 使用 sed 提取 script 标签中的 JSON 数据
-    JSON_DATA=$(echo "$HTML_CONTENT" | sed -n 's/.*<script[^>]*id="__NUXT_DATA__"[^>]*>\[\(.*\)\]<\/script>.*/\1/p' | head -1)
-    
-    if [ -z "$JSON_DATA" ]; then
-        # 尝试另一种方式：直接提取整个 JSON 数组
-        JSON_DATA=$(echo "$HTML_CONTENT" | grep -oP '(?<=id="__NUXT_DATA__"[^>]*>\[)[^\]]+(?=\]</script>)' | head -1)
+    if [ -z "$HTML_CONTENT" ]; then
+        echo_color "red" "Failed to fetch website content!"
+        return 1
     fi
     
-    if [ -z "$JSON_DATA" ]; then
-        echo_color "red" "Failed to extract JSON data from website!"
-        echo_color "yellow" "Trying alternative method..."
-        # 使用 Python 直接从 HTML 提取
-        JSON_DATA=$(echo "$HTML_CONTENT" | python3 << 'PYTHON_EXTRACT'
-import re
-import sys
-html = sys.stdin.read()
-match = re.search(r'<script[^>]*id="__NUXT_DATA__"[^>]*>(\[.*?\])</script>', html, re.DOTALL)
-if match:
-    print(match.group(1))
-PYTHON_EXTRACT
-)
-    fi
-    
-    if [ -z "$JSON_DATA" ]; then
-        echo_color "red" "Failed to extract JSON data from website!"
-        clean_data 1
-    fi
-    
-    # 使用 Python 解析 JSON（更可靠）
-    echo "$JSON_DATA" | python3 << 'PYTHON_SCRIPT'
+    # 使用 Python 提取和解析下载链接
+    local parse_result
+    parse_result=$(echo "$HTML_CONTENT" | python3 << 'PYTHON_SCRIPT'
 import json
 import sys
 import re
 
 try:
-    # 读取标准输入
-    data = sys.stdin.read().strip()
+    html = sys.stdin.read()
     
-    # 清理数据，确保是有效的 JSON
-    if not data.startswith('['):
-        # 尝试找到 JSON 数组部分
-        match = re.search(r'\[.*\]', data, re.DOTALL)
-        if match:
-            data = match.group(0)
+    # 查找包含 downloadConf 的 script 标签
+    scripts = re.findall(r'<script[^>]*>(.*?)</script>', html, re.DOTALL)
     
-    # 解析 JSON
-    json_data = json.loads(data)
+    data_array = None
+    download_conf_idx = None
     
-    # 查找 downloadConf
-    download_conf = None
+    # 遍历所有 script 标签，查找包含 downloadConf 的
+    for script in scripts:
+        if 'downloadConf' in script:
+            # 查找 JSON 数组 - 需要找到完整的数组（从第一个 [ 到匹配的 ]）
+            start_pos = script.find('[')
+            if start_pos != -1:
+                # 从第一个 [ 开始，找到匹配的 ]
+                bracket_count = 0
+                end_pos = start_pos
+                for i in range(start_pos, len(script)):
+                    if script[i] == '[':
+                        bracket_count += 1
+                    elif script[i] == ']':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            end_pos = i + 1
+                            break
+                
+                if end_pos > start_pos:
+                    array_str = script[start_pos:end_pos]
+                    try:
+                        # 尝试解析 JSON 数组
+                        data_array = json.loads(array_str)
+                        
+                        # 查找包含 downloadConf 的对象
+                        for i, item in enumerate(data_array):
+                            if isinstance(item, dict) and 'downloadConf' in item:
+                                download_conf_idx = item['downloadConf']
+                                break
+                        
+                        if download_conf_idx is not None:
+                            break
+                    except json.JSONDecodeError:
+                        continue
     
-    # 遍历 JSON 结构查找 downloadConf
-    def find_download_conf(obj, path=""):
-        if isinstance(obj, dict):
-            if 'downloadConf' in obj:
-                return obj['downloadConf']
-            for key, value in obj.items():
-                result = find_download_conf(value, f"{path}.{key}")
-                if result:
-                    return result
-        elif isinstance(obj, list):
-            for i, item in enumerate(obj):
-                result = find_download_conf(item, f"{path}[{i}]")
-                if result:
-                    return result
-        return None
+    if data_array is None or download_conf_idx is None:
+        print("ERROR: Could not find downloadConf in page", file=sys.stderr)
+        sys.exit(1)
     
-    download_conf = find_download_conf(json_data)
+    # 获取 downloadConf 对象
+    if not isinstance(download_conf_idx, int) or download_conf_idx >= len(data_array):
+        print("ERROR: Invalid downloadConf index", file=sys.stderr)
+        sys.exit(1)
     
-    if download_conf:
-        # 提取各平台下载链接
-        platforms = {
-            'mac': download_conf.get('mac', ''),
-            'windows': download_conf.get('windows', ''),
-            'android': download_conf.get('android', ''),
-            'android32': download_conf.get('android32', ''),
-            'ios': download_conf.get('ios', ''),
-            'linux': download_conf.get('linux', '')
-        }
-        
-        # 输出为 shell 可读的格式
-        for platform, url in platforms.items():
-            if url and url != 'null' and url != '':
+    download_conf = data_array[download_conf_idx]
+    
+    if not isinstance(download_conf, dict):
+        print("ERROR: downloadConf is not a dictionary", file=sys.stderr)
+        sys.exit(1)
+    
+    # 提取各平台下载链接（通过索引）
+    platforms = {
+        'mac': download_conf.get('mac'),
+        'windows': download_conf.get('windows'),
+        'android': download_conf.get('android'),
+        'android32': download_conf.get('android32')
+    }
+    
+    # 输出为 shell 可读的格式
+    found = False
+    for platform, link_idx in platforms.items():
+        if isinstance(link_idx, int) and link_idx < len(data_array):
+            url = data_array[link_idx]
+            if isinstance(url, str) and url.startswith('http'):
                 print(f"{platform}|{url}")
-    else:
-        print("ERROR: downloadConf not found", file=sys.stderr)
+                found = True
+    
+    if not found:
+        print("ERROR: No valid download links found", file=sys.stderr)
         sys.exit(1)
         
 except Exception as e:
     print(f"ERROR: {str(e)}", file=sys.stderr)
+    import traceback
+    traceback.print_exc(file=sys.stderr)
     sys.exit(1)
 PYTHON_SCRIPT
+) || {
+        echo_color "red" "Failed to parse download links from JSON!"
+        return 1
+    }
+    
+    if [ -z "$parse_result" ]; then
+        echo_color "red" "No download links found in JSON!"
+        return 1
+    fi
+    
+    echo "$parse_result"
 }
 
 # 下载安装包
@@ -375,10 +391,13 @@ main() {
     install_depends
 
     # 提取下载链接
-    DOWNLOAD_LINKS=$(extract_download_links)
+    if ! DOWNLOAD_LINKS=$(extract_download_links); then
+        echo_color "red" "Failed to extract download links!"
+        clean_data 1
+    fi
     
     if [ -z "$DOWNLOAD_LINKS" ]; then
-        echo_color "red" "Failed to extract download links!"
+        echo_color "red" "No download links found!"
         clean_data 1
     fi
     
