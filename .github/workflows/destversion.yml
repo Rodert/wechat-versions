@@ -1,6 +1,10 @@
 name: WeChat Version Check
 
 on:
+  push:
+    # 代码提交后自动执行
+    branches:
+      - main
   schedule:
     # 每天 UTC 7:00 (北京时间 15:00) 执行
     - cron: '0 7 * * *'
